@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkywatchPL — panel koordynatora</title>
+<link rel="stylesheet" href="leaflet/leaflet.css">
+<style>
+  :root { --ink:#1f1f1f; --muted:#8a8f98; --grid:#d7d9dc; --surf:#fcfcfb; --blue:#2a78d6; --orange:#eb6834;
+          --ok:#2e9e5b; --warn:#d9a21b; --dead:#8a8f98; --red:#c9302c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.4 system-ui, sans-serif; color:var(--ink); background:var(--surf);
+         display:grid; grid-template-columns:1fr 380px; height:100vh; }
+  #map { height:100vh; }
+  aside { overflow-y:auto; border-left:1px solid var(--grid); padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 6px; } h2 { font-size:12px; text-transform:uppercase; color:var(--muted); margin:14px 0 4px; }
+  .tiles { display:flex; gap:6px; } .tile { flex:1; border:1px solid var(--grid); border-radius:6px; padding:6px; text-align:center; }
+  .tile b { display:block; font-size:20px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td, th { padding:3px 4px; border-bottom:1px solid var(--grid); text-align:left; }
+  tr.sel { background:#eef4fc; } tbody tr { cursor:pointer; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
+  .feed div { padding:3px 0; border-bottom:1px solid var(--grid); font-size:12px; }
+  .feed .hot { color:var(--red); font-weight:600; }
+  button, select, input { font:inherit; } button { cursor:pointer; }
+  .muted { color:var(--muted); } .row { display:flex; gap:6px; align-items:center; margin:4px 0; }
+  #login { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; place-items:center; z-index:2000; }
+  #login form { background:#fff; padding:18px; border-radius:8px; width:320px; }
+  .legend { background:#fff; padding:6px 8px; border-radius:6px; font-size:12px; line-height:1.6; box-shadow:0 1px 4px rgba(0,0,0,.2); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside>
+  <h1>SkywatchPL · koordynator</h1>
+  <div class="muted" id="upd">—</div>
+  <div class="row">Okno:
+    <select id="win"><option value="15">15 min</option><option value="60" selected>1 h</option>
+      <option value="360">6 h</option><option value="1440">24 h</option></select>
+    <label><input type="checkbox" id="showDet" checked> detekcje</label>
+    <button id="fit">wyśrodkuj</button>
+  </div>
+  <div class="tiles">
+    <div class="tile"><b id="nOk">0</b><span class="dot" style="background:var(--ok)"></span>nadające</div>
+    <div class="tile"><b id="nWarn">0</b><span class="dot" style="background:var(--warn)"></span>milczą</div>
+    <div class="tile"><b id="nDead">0</b><span class="dot" style="background:var(--dead)"></span>utracone</div>
+  </div>
+
+  <h2>Urządzenia</h2>
+  <table id="stats"></table>
+
+  <h2>Zaufanie</h2>
+  <div id="keys" class="muted">—</div>
+  <div class="row"><input id="trCode" placeholder="kod z telefonu, np. 92B5-180A" style="flex:1">
+    <button data-tr="trusted">zaufany</button><button data-tr="new">nowy</button><button data-tr="blocked">blokuj</button></div>
+  <div class="row"><button id="pause"></button></div>
+
+  <h2>Punkty nadające</h2>
+  <table><thead><tr><th></th><th>punkt</th><th>zauf.</th><th>ostatnio</th><th>bat.</th><th>det.</th><th>app</th></tr></thead>
+    <tbody id="nodes"></tbody></table>
+
+  <h2>Zgłoszenia</h2>
+  <div class="feed" id="feed"></div>
+
+  <h2>Alarmy</h2>
+  <div class="row">
+    <select id="alLevel"><option value="1">poziom 1</option><option value="2">poziom 2</option><option value="3">poziom 3</option></select>
+    <input id="alText" placeholder="treść (bez współrzędnych)" style="flex:1">
+  </div>
+  <div class="row"><button id="alSend">Wyślij alarm</button><button id="alCancel">Odwołaj</button></div>
+  <div class="feed" id="alerts"></div>
+  <p class="muted">Dane tylko dla koordynatora (ZASADY pkt 2): nie udostępniaj zrzutów tej mapy.</p>
+  <button id="logout" class="muted">wyloguj</button>
+</aside>
+
+<div id="login"><form id="loginForm">
+  <b>Token admina</b><p class="muted">SKYWATCH_ADMIN_TOKEN z hub.env. Zostaje tylko w tej przeglądarce.</p>
+  <input id="tok" type="password" style="width:100%" autofocus><div class="row"><button>Zaloguj</button></div>
+</form></div>
+
+<script src="leaflet/leaflet.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const C = { ok:"#2e9e5b", warn:"#d9a21b", dead:"#8a8f98", blue:"#2a78d6", orange:"#eb6834", red:"#c9302c" };
+let token = localStorage.getItem("skywatchAdmin") || "", state = null, selected = null, fitted = false;
+
+const map = L.map("map", { zoomControl:true }).setView([52.1, 21.0], 7);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  { maxZoom:19, attribution:"© OpenStreetMap" }).addTo(map);
+const layNodes = L.layerGroup().addTo(map), layEv = L.layerGroup().addTo(map);
+const legend = L.control({ position:"bottomleft" });
+legend.onAdd = () => Object.assign(L.DomUtil.create("div", "legend"), { innerHTML:
+  `<span class="dot" style="background:${C.ok}"></span>punkt aktywny (&lt;3 min)<br>
+   <span class="dot" style="background:${C.warn}"></span>milczy 3–30 min<br>
+   <span class="dot" style="background:${C.dead}"></span>utracony &gt;30 min<br>
+   <span class="dot" style="border:2px dashed ${C.ok};width:11px;height:11px"></span>w ruchu (nie liczy się do fuzji)<br>
+   <span class="dot" style="background:${C.orange}"></span>detekcja · <span class="dot" style="background:${C.red}"></span>jak Shahed<br>
+   <span style="color:${C.blue}">━</span> zgłoszenie ręczne (kierunek)` });
+legend.addTo(map);
+
+const ago = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+const hhmm = t => new Date(t * 1000).toLocaleTimeString("pl-PL", { hour:"2-digit", minute:"2-digit", second:"2-digit" });
+const short = n => (n || "?").slice(0, 6);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const TR = { trusted:"✔", legacy:"0.13", new:"nowy", blocked:"⛔" };
+const status = age => age < 180 ? "ok" : age < 1800 ? "warn" : "dead";
+
+async function api(path, opt = {}) {
+  const r = await fetch(path, { ...opt, headers:{ ...(opt.headers || {}), Authorization:`Bearer ${token}` } });
+  if (r.status === 401 || r.status === 403) { showLogin(); throw new Error("auth"); }
+  if (!r.ok) throw new Error((await r.json()).error || r.status);
+  return r;
+}
+function showLogin() { $("login").style.display = "grid"; }
+$("loginForm").onsubmit = e => { e.preventDefault(); token = $("tok").value.trim();
+  localStorage.setItem("skywatchAdmin", token); $("login").style.display = "none"; refresh(); };
+$("logout").onclick = () => { localStorage.removeItem("skywatchAdmin"); token = ""; showLogin(); };
+
+// punkt oddalony o dist metrów w kierunku az (°) — do rysowania linii zgłoszenia ręcznego
+function dest(lat, lon, az, dist) {
+  const r = az * Math.PI / 180, dLat = dist * Math.cos(r) / 111320, dLon = dist * Math.sin(r) / (111320 * Math.cos(lat * Math.PI / 180));
+  return [lat + dLat, lon + dLon];
+}
+
+function nodePopup(n, age) {
+  const prov = n.loc_diag?.providers ? Object.entries(n.loc_diag.providers).map(([k, v]) => `${k}: ${esc(v)}`).join(", ") : "—";
+  return `<b>punkt ${esc(short(n.node))}</b> <span class="muted">${esc(n.model || "")}</span><br>
+    ostatni puls: ${ago(age)} temu<br>bateria: ${n.battery ?? "?"}%${n.charging ? " (ładuje)" : ""}<br>
+    aplikacja: ${esc(n.app || "?")} · tryb: ${esc(n.mode || "?")}<br>
+    ${n.moving ? `w ruchu, ${n.speed_kmh ?? "?"} km/h<br>` : ""}
+    tło: ${n.floor_db != null ? n.floor_db.toFixed(1) + " dB" : "?"}<br>
+    dokładność: ±${n.acc != null ? Math.round(n.acc) : "?"} m<br><span class="muted">${prov}</span><br>
+    detekcji w oknie: ${n.det}`;
+}
+
+function evLabel(e) {
+  const h = e.harm || {};
+  if (e.type === "detection") return `${e.method === "harmonic" ? "ton harmoniczny" : "głośność"} ${e.peak_db != null ? e.peak_db.toFixed(0) + " dB" : ""}${h.f0_med ? ` · ${h.f0_med} Hz` : ""}${h.shahed_like ? " · JAK SHAHED" : ""}${e.moving ? " · w ruchu" : ""}`;
+  if (e.type === "track") return `ślad ${e.windows} okien, ${e.f_min}–${e.f_max} Hz${e.flyby ? ` · przelot ~${e.flyby.speed_kmh} km/h` : ""}`;
+  if (e.type === "manual") return `ręczne: ${e.kind === "see" ? "widzę" : "słyszę"}, az ${e.az}°, el ${e.el}°`;
+  if (e.type === "feedback") return `odpowiedź na alarm: ${e.alert ? "potwierdzam" : "nic"}`;
+  return e.type;
+}
+
+function draw() {
+  const now = state.now;
+  layNodes.clearLayers(); layEv.clearLayers();
+  const cnt = { ok:0, warn:0, dead:0 }, pts = [];
+  state.nodes.sort((a, b) => b._rx - a._rx);
+  $("nodes").innerHTML = "";
+  const st = state.stats;
+  if (st) $("stats").innerHTML = `<thead><tr><th></th><th>teraz</th><th>1 h</th><th>24 h</th></tr></thead><tbody>
+    <tr><td>wszystkie</td><td><b>${st.active.total}</b></td><td>${st.hour.total}</td><td>${st.day.total}</td></tr>
+    <tr><td>nadające</td><td>${st.active.senders}</td><td>${st.hour.senders}</td><td>${st.day.senders}</td></tr>
+    <tr><td>&nbsp;· z mikrofonem</td><td>${st.active.sensors}</td><td>${st.hour.sensors}</td><td>${st.day.sensors}</td></tr>
+    <tr><td>tylko odbiór</td><td>${st.active.receivers}</td><td>${st.hour.receivers}</td><td>${st.day.receivers}</td></tr>
+    <tr><td class="muted" colspan="4">znane urządzenia: ${st.known} · wersje teraz: ${Object.entries(st.versions).map(([k, v]) => `${esc(k)} ×${v}`).join(", ") || "—"}</td></tr></tbody>`;
+  for (const n of state.nodes) {
+    if (n.mode === "receiver") continue;   // odbiorcy nie mają pozycji — liczeni tylko w tabeli „Urządzenia”
+    const age = now - n._rx, st = status(age); cnt[st]++;
+    const tr = document.createElement("tr");
+    if (n.node === selected) tr.className = "sel";
+    tr.innerHTML = `<td><span class="dot" style="background:${C[st]}"></span></td><td>${esc(short(n.node))}</td>
+      <td title="${esc(n.trust)}">${TR[n.trust] || "?"}</td><td>${ago(age)}</td><td>${n.battery ?? "?"}%${n.charging ? "⚡" : ""}</td><td>${n.det}</td><td>${esc(n.app || "")}</td>`;
+    tr.onclick = () => { selected = n.node; if (n.lat != null) map.setView([n.lat, n.lon], 15); draw(); };
+    $("nodes").appendChild(tr);
+    if (n.lat == null) continue;
+    pts.push([n.lat, n.lon]);
+    if (n.acc) L.circle([n.lat, n.lon], { radius:n.acc, color:C[st], weight:1, opacity:.4, fillOpacity:.06, interactive:false }).addTo(layNodes);
+    L.circleMarker([n.lat, n.lon], { radius:n.node === selected ? 10 : 8, color:C[st], weight:n.moving ? 3 : 2,
+      dashArray:n.moving ? "4 3" : null, fillColor:C[st], fillOpacity:n.moving ? .25 : .85 })
+      .bindPopup(nodePopup(n, age)).addTo(layNodes);
+  }
+  const k = state.keys;
+  if (k) {
+    $("keys").innerHTML = `zaufane: <b>${k.trusted}</b> · nowe: <b>${k.new}</b> · zablokowane: ${k.blocked}<br>
+      dołączyło: ${k.joined_hour} w 1 h, ${k.joined_day} w 24 h · napływ ${k.influx}/${k.influx_limit} w ${k.influx_window_min} min`;
+    $("pause").textContent = k.paused.on ? `▶ Przywróć wpływ nowych na alarmy (wstrzymany${k.paused.auto ? " automatycznie" : ""})`
+                                         : "⏸ Wstrzymaj wpływ nowych na alarmy";
+    $("pause").style.color = k.paused.on ? C.red : "";
+  }
+  $("nOk").textContent = cnt.ok; $("nWarn").textContent = cnt.warn; $("nDead").textContent = cnt.dead;
+
+  const evs = state.events.filter(e => !selected || e.node === selected);
+  for (const e of evs) {
+    if (e.lat == null) continue;
+    if (e.type === "detection" && $("showDet").checked) {
+      const hot = e.harm?.shahed_like;
+      L.circleMarker([e.lat, e.lon], { radius:hot ? 6 : 3, stroke:false, fillColor:hot ? C.red : C.orange, fillOpacity:hot ? .9 : .5 })
+        .bindTooltip(`${hhmm(e._rx)} · ${esc(evLabel(e))}`).addTo(layEv);
+    } else if (e.type === "manual" && e.az != null) {
+      L.polyline([[e.lat, e.lon], dest(e.lat, e.lon, e.az, 2000)], { color:C.blue, weight:3, opacity:.8 })
+        .bindTooltip(`${hhmm(e._rx)} · ${esc(evLabel(e))}`).addTo(layEv);
+    }
+  }
+  $("feed").innerHTML = evs.slice(-60).reverse().map(e => {
+    const clip = e.clip ? ` <button data-node="${esc(e.node)}" data-clip="${esc(e.clip)}">▶</button>${e.keep ? ' <span title="nagranie przy alarmie — zachowane na stałe">📌</span>' : ""}` : "";
+    const hot = e.harm?.shahed_like || e.flyby || e.type === "manual";
+    return `<div class="${hot ? "hot" : ""}">${hhmm(e._rx)} <span class="muted">${esc(short(e.node))}</span> ${esc(evLabel(e))}${e.lat == null ? ' <span class="muted">(bez pozycji)</span>' : ""}${clip}</div>`;
+  }).join("") || '<span class="muted">brak w tym oknie</span>';
+  $("alerts").innerHTML = state.alerts.slice().reverse().map(a =>
+    `<div>${new Date(a.t).toLocaleString("pl-PL")} · ${a.cancel ? "odwołanie" : a.quiet ? "podejrzenie (ciche)" : "poziom " + a.level}: ${esc(a.text)}</div>`).join("") || '<span class="muted">brak</span>';
+  if (!fitted && pts.length) { map.fitBounds(pts, { padding:[40, 40], maxZoom:14 }); fitted = true; }
+  $("upd").textContent = `odświeżono ${hhmm(now)}${selected ? " · filtr: punkt " + short(selected) + " (kliknij mapę, by zdjąć)" : ""}`;
+}
+
+async function refresh() {
+  if (!token) return showLogin();
+  try { state = await (await api(`api/state?min=${$("win").value}`)).json(); draw(); }
+  catch (e) { if (e.message !== "auth") $("upd").textContent = "błąd: " + e.message; }
+}
+
+$("feed").onclick = async e => {
+  const b = e.target.closest("button[data-clip]"); if (!b) return;
+  b.textContent = "…";
+  try {
+    const blob = await (await api(`api/clip?node=${encodeURIComponent(b.dataset.node)}&name=${encodeURIComponent(b.dataset.clip)}`)).blob();
+    new Audio(URL.createObjectURL(blob)).play(); b.textContent = "▶";
+  } catch (err) { b.textContent = "brak"; }
+};
+async function sendAlert(body) {
+  try { await api("api/alert", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body) }); refresh(); }
+  catch (e) { if (e.message !== "auth") alert("Nie wysłano: " + e.message); }
+}
+$("alSend").onclick = () => {
+  const text = $("alText").value.trim(), level = +$("alLevel").value;
+  if (!text) return alert("Wpisz treść alarmu.");
+  if (confirm(`Wysłać alarm poziomu ${level} do WSZYSTKICH telefonów?\n\n${text}`)) sendAlert({ level, text });
+};
+document.querySelectorAll("button[data-tr]").forEach(b => b.onclick = async () => {
+  const code = $("trCode").value.trim(); if (!code) return alert("Wpisz kod z ekranu telefonu.");
+  try { await api("api/trust", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ code, trust:b.dataset.tr }) });
+        $("trCode").value = ""; refresh(); }
+  catch (e) { if (e.message !== "auth") alert(e.message); }
+});
+$("pause").onclick = async () => {
+  const on = !state?.keys?.paused?.on;
+  if (!confirm(on ? "Wstrzymać wpływ nowych punktów na alarmy?" : "Przywrócić wpływ nowych punktów na alarmy?")) return;
+  try { await api("api/pause", { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ on }) }); refresh(); }
+  catch (e) { if (e.message !== "auth") alert(e.message); }
+};
+$("alCancel").onclick = () => confirm("Odwołać alarm na wszystkich telefonach?") && sendAlert({ cancel:true });
+$("win").onchange = refresh; $("showDet").onchange = draw;
+$("fit").onclick = () => { fitted = false; selected = null; draw(); };
+map.on("click", () => { if (selected) { selected = null; draw(); } });
+
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>

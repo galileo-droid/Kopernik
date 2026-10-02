@@ -1,0 +1,12 @@
+<!-- SkywatchPL Alarm: bez mikrofonu i bez lokalizacji w tle. Lokalizacja (gdy jest zgoda) tylko przy zgłoszeniu „słyszę / widzę”. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" tools:node="remove" />
+    <!-- tylko po to, by ostrzec, gdy na tym samym telefonie stoi też Czujnik -->
+    <queries><package android:name="pl.skywatch.app" /></queries>
+    <application>
+        <service android:name=".WatchService" android:foregroundServiceType="specialUse" tools:replace="android:foregroundServiceType" />
+    </application>
+</manifest>

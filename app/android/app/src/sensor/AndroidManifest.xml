@@ -1,0 +1,15 @@
+<!-- SkywatchPL Czujnik: nie odbiera i nie gra alarmów — bez ekranu alarmu i bez pełnoekranowych powiadomień. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" tools:node="remove" />
+    <!-- tylko po to, by ostrzec, gdy na tym samym telefonie stoi też aplikacja Alarm -->
+    <queries><package android:name="pl.skywatch.alarm" /></queries>
+    <application>
+        <activity android:name=".AlarmActivity" tools:node="remove" />
+        <service android:name=".WatchService" tools:node="merge">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Utrzymanie łączności czujnika z serwerem grupy, gdy mikrofon lub lokalizacja są niedostępne."
+                tools:replace="android:value" />
+        </service>
+    </application>
+</manifest>
